@@ -6,12 +6,17 @@
 # LICENSE file in the root directory of this source tree.
 """A script to make and save model predictions on an input dataset."""
 
-import os
+import os, sys
 import time
 import torch
 import argparse
 import logging
 import json
+import pathlib
+
+dir1 = pathlib.Path(__file__).parent.absolute()
+
+sys.path.append(os.path.abspath('/'.join (dir1.split ('/')[ : -2 ])))
 
 from tqdm import tqdm
 from drqa.reader import Predictor

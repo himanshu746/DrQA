@@ -11,7 +11,13 @@ import code
 import argparse
 import logging
 import prettytable
-import time
+import time, os, sys
+
+import pathlib
+
+dir1 = pathlib.Path(__file__).parent.absolute()
+
+sys.path.append(os.path.abspath('/'.join (dir1.split ('/')[ : -2 ])))
 
 from drqa.reader import Predictor
 

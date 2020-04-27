@@ -14,7 +14,11 @@ import os
 import sys
 import subprocess
 import logging
+import pathlib
 
+dir1 = pathlib.Path(__file__).parent.absolute()
+
+sys.path.append(os.path.abspath('/'.join (dir1.split ('/')[ : -2 ])))
 
 from drqa.reader import utils, vector, config, data
 from drqa.reader import DocReader
@@ -72,12 +76,12 @@ def add_train_args(parser):
     files.add_argument('--data-dir', type=str, default=DATA_DIR,
                        help='Directory of training/validation data')
     files.add_argument('--train-file', type=str,
-                       default='SQuAD-v1.1-train-processed-corenlp.txt',
+                       default='train-processed-corenlp.txt',
                        help='Preprocessed train file')
     files.add_argument('--dev-file', type=str,
-                       default='SQuAD-v1.1-dev-processed-corenlp.txt',
+                       default='dev-processed-corenlp.txt',
                        help='Preprocessed dev file')
-    files.add_argument('--dev-json', type=str, default='SQuAD-v1.1-dev.json',
+    files.add_argument('--dev-json', type=str, default='dev.json',
                        help=('Unprocessed dev file to run validation '
                              'while training on'))
     files.add_argument('--embed-dir', type=str, default=EMBED_DIR,

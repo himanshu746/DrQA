@@ -11,6 +11,10 @@ import os
 import sys
 import json
 import time
+import pathlib
+
+dir1 = pathlib.Path(__file__).parent.absolute()
+sys.path.append(os.path.abspath('/'.join (dir1.split ('/')[ : -2 ])))
 
 from multiprocessing import Pool
 from multiprocessing.util import Finalize
@@ -131,7 +135,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('data_dir', type=str, help='Path to SQuAD data directory')
 parser.add_argument('out_dir', type=str, help='Path to output file dir')
 parser.add_argument('--split', type=str, help='Filename for train/dev split',
-                    default='SQuAD-v1.1-train')
+                    default='train')
 parser.add_argument('--workers', type=int, default=None)
 parser.add_argument('--tokenizer', type=str, default='corenlp')
 args = parser.parse_args()
