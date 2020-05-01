@@ -13,8 +13,9 @@ import json
 import time
 import pathlib
 
-dir1 = pathlib.Path(__file__).parent.absolute()
-sys.path.append(os.path.abspath('/'.join (dir1.split ('/')[ : -2 ])))
+dir1 = pathlib.Path().absolute()
+
+sys.path.append(os.path.abspath(str (dir1)))
 
 from multiprocessing import Pool
 from multiprocessing.util import Finalize

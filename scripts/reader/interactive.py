@@ -15,9 +15,9 @@ import time, os, sys
 
 import pathlib
 
-dir1 = pathlib.Path(__file__).parent.absolute()
+dir1 = pathlib.Path().absolute()
 
-sys.path.append(os.path.abspath('/'.join (dir1.split ('/')[ : -2 ])))
+sys.path.append(os.path.abspath(str (dir1)))
 
 from drqa.reader import Predictor
 
