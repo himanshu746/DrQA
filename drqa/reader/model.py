@@ -31,11 +31,19 @@ class DocReader(object):
     # Initialization
     # --------------------------------------------------------------------------
 
-    def __init__(self, args, word_dict, feature_dict,
-                 train_loader_target,
+    def set_iterators (self, train_loader_target,
                  train_loader_source_Q,
-                 train_loader_target_Q,
-                 state_dict=None, normalize=True):
+                 train_loader_target_Q):
+        self.train_loader_target = train_loader_target
+        self.train_loader_source_Q = train_loader_source_Q
+        self.train_loader_target_Q = train_loader_target_Q
+
+        # Make Iterators for Data Loaders
+        self.train_iter_source_Q = iter (self.train_loader_source_Q)
+        self.train_iter_target = iter (self.train_loader_target)
+        self.train_iter_target_Q = iter (self.train_loader_target_Q)
+
+    def __init__(self, args, word_dict, feature_dict, state_dict=None, normalize=True):
         # Book-keeping.
         self.args = args
         self.word_dict = word_dict
@@ -45,9 +53,7 @@ class DocReader(object):
         self.updates = 0
         self.use_cuda = False
         self.parallel = False
-        self.train_loader_target = train_loader_target
-        self.train_loader_source_Q = train_loader_source_Q
-        self.train_loader_target_Q = train_loader_target_Q
+        
 
         # Building network. If normalize is false, scores are not normalized
         # 0-1 per paragraph (no softmax).
@@ -65,15 +71,11 @@ class DocReader(object):
             question_hidden_size *= args.question_layers
 
         # 2. Question - Answering network
-        self.P = DocQA (args, normalize)
+        self.P = DocQA (doc_hidden_size, question_hidden_size, normalize)
 
         # 3. Language Detector
-        self.Q = LanguageDetector (doc_hidden_size, args.hidden_size_Q, args.dropoutQ, args.batch_norm_q)
-
-        # Make Iterators for Data Loaders
-        self.train_iter_source_Q = iter (self.train_loader_source_Q)
-        self.train_iter_target = iter (self.train_loader_target)
-        self.train_iter_target_Q = iter (self.train_loader_target_Q)
+        self.Q = LanguageDetector(2, doc_hidden_size, args.dropoutQ, True)
+        # self.Q = LanguageDetector (doc_hidden_size, question_hidden_size, normalize, 2, args.dropoutQ, True)
 
         # TODO : Write good comment
         self.sum_source_q, self.sum_target_q = dict(), dict()
@@ -252,6 +254,13 @@ class DocReader(object):
             'target_e' : target_e
         }
 
+    def getInputForQ(self, a, b):
+        b = b.float()
+        b = b.unsqueeze(1)
+        a = b @ a
+        a = a.squeeze(1)
+        return a
+
     def update(self, ex, n_critic, current_epoch):
         """Forward a batch of examples; step the optimizer to update weights."""
         if (not self.optimizerF) or (not self.optimizerQ):
@@ -299,18 +308,20 @@ class DocReader(object):
             q_inputs_source = self.getDataPoint (inputs_source_q)
             q_inputs_target = self.getDataPoint (inputs_target_q)
 
-            features_source = self.F (*(q_inputs_source['inputs']))
-            o_source_ad = self.Q (features_source[0])
+            features_source = self.F(*(q_inputs_source['inputs']))
+            input_q = self.getInputForQ (features_source[0], features_source[2])
+            o_source_ad = self.Q (input_q)
             l_source_ad = torch.mean (o_source_ad)
             (-l_source_ad).backward()
-            logger.dubug (f'Q grad norm: {self.Q.net[1].weight.grad.data.norm()}')
+            logger.debug (f'Q grad norm: {self.Q.net[1].weight.grad.data.norm()}')
             if self.sum_source_q.get (current_epoch, None) is None:
                 self.sum_source_q[current_epoch] = [0, 0.0]
             self.sum_source_q[current_epoch][0] += 1
             self.sum_source_q[current_epoch][1] += l_source_ad.item()
 
-            features_target = self.F (*(q_inputs_target['inputs']))
-            o_target_ad = self.Q (features_target[0])
+            features_target = self.F(*(q_inputs_target['inputs']))
+            input_q = self.getInputForQ (features_target[0], features_target[2])
+            o_target_ad = self.Q (input_q)
             l_target_ad = torch.mean (o_target_ad)
             l_target_ad.backward()
             logger.debug (f'Q grad norm: {self.Q.net[1].weight.grad.data.norm()}')
@@ -333,20 +344,22 @@ class DocReader(object):
         self.P.zero_grad()
 
         features_source = self.F(*(data_point_source['inputs']))
-        score_s, score_e = self.P(features_source)
+        score_s, score_e = self.P(*features_source)
 
         # Compute loss and accuracies
         l_source_qa = F.nll_loss(score_s, data_point_source['target_s']) + F.nll_loss(score_e, data_point_source['target_e'])
-        l_source_qa.backward()
+        l_source_qa.backward(retain_graph=True)
         
-        o_source_ad = self.Q(features_source)
+        input_q = self.getInputForQ (features_source[0], features_source[2])
+        o_source_ad = self.Q(input_q)
         l_source_ad = torch.mean(o_source_ad)
-        (self.args.lambd * l_source_ad).backward()
+        (self.args.lambd * l_source_ad).backward(retain_graph=True)
 
         features_target = self.F(*(data_point_target['inputs']))
-        o_target_ad = self.Q(features_target)
+        input_q = self.getInputForQ (features_target[0], features_target[2])
+        o_target_ad = self.Q(input_q)
         l_target_ad = torch.mean(o_target_ad)
-        (-self.args.lambd * l_target_ad).backward()
+        (-self.args.lambd * l_target_ad).backward(retain_graph=True)
 
         # Clip gradients
         torch.nn.utils.clip_grad_norm_(self.F.parameters(),
@@ -414,7 +427,7 @@ class DocReader(object):
         # Run forward
         with torch.no_grad():
             features = self.F(*inputs)
-            score_s, score_e = self.P(features)
+            score_s, score_e = self.P(*features)
 
         # Decode predictions
         score_s = score_s.data.cpu()
@@ -578,7 +591,7 @@ class DocReader(object):
             logger.warning('WARN: Saving failed... continuing anyway.')
 
     @staticmethod
-    def load(filename, args, train_loader_target, train_loader_source_Q, train_loader_target_Q, new_args=None, normalize=True):
+    def load(filename, args, new_args=None, normalize=True):
         logger.info('Loading model %s' % filename)
         saved_params = torch.load(
             filename, map_location=lambda storage, loc: storage
@@ -589,10 +602,10 @@ class DocReader(object):
         args = saved_params['args']
         if new_args:
             args = override_model_args(args, new_args)
-        return DocReader(args, word_dict, feature_dict, train_loader_target, train_loader_source_Q, train_loader_target_Q, state_dict, normalize)
+        return DocReader(args, word_dict, feature_dict, state_dict, normalize)
 
     @staticmethod
-    def load_checkpoint(filename, train_loader_target, train_loader_source_Q, train_loader_target_Q, normalize=True):
+    def load_checkpoint(filename, normalize=True):
         logger.info('Loading model %s' % filename)
         saved_params = torch.load(
             filename, map_location=lambda storage, loc: storage
@@ -603,7 +616,7 @@ class DocReader(object):
         epoch = saved_params['epoch']
         optimizer = saved_params['optimizer']
         args = saved_params['args']
-        model = DocReader(args, word_dict, feature_dict, train_loader_target, train_loader_source_Q, train_loader_target_Q, state_dict, normalize)
+        model = DocReader(args, word_dict, feature_dict, state_dict, normalize)
         model.init_optimizer(optimizer)
         return model, epoch
 

@@ -68,15 +68,7 @@ def add_train_args(parser):
                          help='Batch size during validation/testing')
 
     # Hyperparameters for Adv. Training
-    runtime.add_argument('--Q-learning-rate', type=float, default=0.0005, help='Learning rate for language detector')
-    runtime.add_argument('--clip-lower', type=float, default=-0.01, help='Lower limit for clip for language detector weights')
-    runtime.add_argument('--clip-upper', type=float, default=0.01, help='Upper limit for clip for language detector weights')
-    runtime.add_argument('--lambd', type=float, default=0.01, help='Lambda for Adv. Training')
-    runtime.add_argument('--hidden-size-Q', type=int, default=900, help='Size of Hidden Layer in language detector')
-    runtime.add_argument('--dropoutQ', type=float, default=0.2, help='Dropout for language detector')
-    runtime.add_argument('--batch-norm-q', type=float, default=True, help='Should language detector use batch normalization')
-    runtime.add_argument('--n_critic', type=int, default=5,
-                     help='Number of iterations of language detector per source dataloader iteration')
+    
 
     # Files
     files = parser.add_argument_group('Filesystem')
@@ -90,21 +82,21 @@ def add_train_args(parser):
                        default='train-processed-simple.txt',
                        help='Preprocessed train file')
     files.add_argument('--train-file-source', type=str,
-                       default='train-english-processed-simple.txt',
+                       default='english_train-processed-simple.txt',
                        help='Preprocessed train file for source language')
     files.add_argument('--train-file-target', type=str,
-                        default='train-bengali-processed-simple.txt',
+                        default='bengali_train-processed-simple.txt',
                         help='Preprocessed train file for target language')
     files.add_argument('--dev-file', type=str,
-                       default='dev-processed-simple.txt',
+                       default='bengali_dev-processed-simple.txt',
                        help='Preprocessed dev file')
-    files.add_argument('--dev-json', type=str, default='dev.json',
+    files.add_argument('--dev-json', type=str, default='bengali_dev.json',
                        help=('Unprocessed dev file to run validation '
                              'while training on'))
     files.add_argument('--embed-dir', type=str, default=EMBED_DIR,
                        help='Directory of pre-trained embedding files')
     files.add_argument('--embedding-file', type=str,
-                       default='glove.840B.300d.txt',
+                       default='bengali_english.EMB',
                        help='Space-separated pretrained embeddings file')
 
     # Saving + loading
@@ -146,6 +138,12 @@ def set_defaults(args):
     args.train_file = os.path.join(args.data_dir, args.train_file)
     if not os.path.isfile(args.train_file):
         raise IOError('No such file: %s' % args.train_file)
+    args.train_file_source = os.path.join(args.data_dir, args.train_file_source)
+    if not os.path.isfile(args.train_file_source):
+        raise IOError('No such file: %s' % args.train_file_source)
+    args.train_file_target = os.path.join(args.data_dir, args.train_file_target)
+    if not os.path.isfile(args.train_file_target):
+        raise IOError('No such file: %s' % args.train_file_target)
     args.dev_file = os.path.join(args.data_dir, args.dev_file)
     if not os.path.isfile(args.dev_file):
         raise IOError('No such file: %s' % args.dev_file)
@@ -199,10 +197,7 @@ def set_defaults(args):
 # ------------------------------------------------------------------------------
 
 
-def init_from_scratch(args, train_exs, dev_exs,
-                        train_loader_target,
-                        train_loader_source_Q,
-                        train_loader_target_Q):
+def init_from_scratch(args, train_exs, dev_exs):
     """New model, new data, new dictionary."""
     # Create a feature dict out of the annotations in the data
     logger.info('-' * 100)
@@ -218,10 +213,7 @@ def init_from_scratch(args, train_exs, dev_exs,
     logger.info('Num words = %d' % len(word_dict))
 
     # Initialize model
-    model = DocReader(config.get_model_args(args), word_dict, feature_dict,
-                 train_loader_target,
-                 train_loader_source_Q,
-                 train_loader_target_Q)
+    model = DocReader(config.get_model_args(args), word_dict, feature_dict)
 
     # Load pretrained embeddings for words in dictionary
     if args.embedding_file:
@@ -247,7 +239,7 @@ def train(args, data_loader, data_loader_source, data_loader_target, train_loade
         # Calculate n_critic
         epoch = global_stats['epoch']
         n_critic = args.n_critic
-        if n_critic > 0 and ((epoch == 0 and idx <= 25) or (i % 500 == 0)):
+        if n_critic > 0 and ((epoch == 0 and idx <= 25) or (edx % 500 == 0)):
             n_critic = 10
 
         train_loss.update(*model.update(ex, n_critic, epoch))
@@ -416,6 +408,60 @@ def main(args):
         dev_answers = utils.load_answers(args.dev_json)
 
     # --------------------------------------------------------------------------
+    # MODEL
+    logger.info('-' * 100)
+    start_epoch = 0
+    if args.checkpoint and os.path.isfile(args.model_file + '.checkpoint'):
+        # Just resume training, no modifications.
+        logger.info('Found a checkpoint...')
+        checkpoint_file = args.model_file + '.checkpoint'
+        model, start_epoch = DocReader.load_checkpoint(checkpoint_file, normalize=True)
+    else:
+        # Training starts fresh. But the model state is either pretrained or
+        # newly (randomly) initialized.
+        if args.pretrained:
+            logger.info('Using pretrained model...')
+            model = DocReader.load(args.pretrained,  new_args=None, normalize=True)
+            if args.expand_dictionary:
+                logger.info('Expanding dictionary for new data...')
+                # Add words in training + dev examples
+                words = utils.load_words(args, train_exs + dev_exs)
+                added = model.expand_dictionary(words)
+                # Load pretrained embeddings for added words
+                if args.embedding_file:
+                    model.load_embeddings(added, args.embedding_file)
+
+        else:
+            logger.info('Training model from scratch...')
+            model = init_from_scratch(args, train_exs, dev_exs)
+
+        # Set up partial tuning of embeddings
+        if args.tune_partial > 0:
+            logger.info('-' * 100)
+            logger.info('Counting %d most frequent question words' %
+                        args.tune_partial)
+            top_words = utils.top_question_words(
+                args, train_exs, model.word_dict
+            )
+            for word in top_words[:5]:
+                logger.info(word)
+            logger.info('...')
+            for word in top_words[-6:-1]:
+                logger.info(word)
+            model.tune_embeddings([w[0] for w in top_words])
+
+        # Set up optimizer
+        model.init_optimizer()
+
+    # Use the GPU?
+    if args.cuda:
+        model.cuda()
+
+    # Use multiple GPUs?
+    if args.parallel:
+        model.parallelize()
+
+    # --------------------------------------------------------------------------
     # DATA ITERATORS
     # Two datasets: train and dev. If we sort by length it's faster.
     logger.info('-' * 100)
@@ -494,64 +540,6 @@ def main(args):
         collate_fn=vector.batchify,
         pin_memory=args.cuda,
     )
-
-    # --------------------------------------------------------------------------
-    # MODEL
-    logger.info('-' * 100)
-    start_epoch = 0
-    if args.checkpoint and os.path.isfile(args.model_file + '.checkpoint'):
-        # Just resume training, no modifications.
-        logger.info('Found a checkpoint...')
-        checkpoint_file = args.model_file + '.checkpoint'
-        model, start_epoch = DocReader.load_checkpoint(checkpoint_file, train_loader_target, train_loader_source_Q, train_loader_target_Q, normalize=True)
-    else:
-        # Training starts fresh. But the model state is either pretrained or
-        # newly (randomly) initialized.
-        if args.pretrained:
-            logger.info('Using pretrained model...')
-            model = DocReader.load(args.pretrained,  train_loader_target, train_loader_source_Q, train_loader_target_Q, new_args=None, normalize=True)
-            if args.expand_dictionary:
-                logger.info('Expanding dictionary for new data...')
-                # Add words in training + dev examples
-                words = utils.load_words(args, train_exs + dev_exs)
-                added = model.expand_dictionary(words)
-                # Load pretrained embeddings for added words
-                if args.embedding_file:
-                    model.load_embeddings(added, args.embedding_file)
-
-        else:
-            logger.info('Training model from scratch...')
-            model = init_from_scratch(args, train_exs, dev_exs,
-                                        train_loader_target,
-                                        train_loader_source_Q,
-                                        train_loader_target_Q)
-
-        # Set up partial tuning of embeddings
-        if args.tune_partial > 0:
-            logger.info('-' * 100)
-            logger.info('Counting %d most frequent question words' %
-                        args.tune_partial)
-            top_words = utils.top_question_words(
-                args, train_exs, model.word_dict
-            )
-            for word in top_words[:5]:
-                logger.info(word)
-            logger.info('...')
-            for word in top_words[-6:-1]:
-                logger.info(word)
-            model.tune_embeddings([w[0] for w in top_words])
-
-        # Set up optimizer
-        model.init_optimizer()
-
-    # Use the GPU?
-    if args.cuda:
-        model.cuda()
-
-    # Use multiple GPUs?
-    if args.parallel:
-        model.parallelize()
-
     
 
     # -------------------------------------------------------------------------
@@ -565,6 +553,9 @@ def main(args):
     logger.info('-' * 100)
     logger.info('Starting training...')
     stats = {'timer': utils.Timer(), 'epoch': 0, 'best_valid': 0}
+
+    model.set_iterators (train_loader_target, train_loader_source_Q, train_loader_target_Q)
+
     for epoch in range(start_epoch, args.num_epochs):
         stats['epoch'] = epoch
 
@@ -628,6 +619,8 @@ if __name__ == '__main__':
         logfile.setFormatter(fmt)
         logger.addHandler(logfile)
     logger.info('COMMAND: %s' % ' '.join(sys.argv))
+
+    # print (args.)
 
     # Run!
     main(args)

@@ -26,4 +26,7 @@ class LanguageDetector(nn.Module):
         self.net.add_module('q-linear-final', nn.Linear(hidden_size, 1))
 
     def forward(self, input):
+        # mask = mask.unsqueeze(1)
+        # input = torch.matmul (mask, input)
+        # input = input.squeeze (1)
         return self.net(input)
