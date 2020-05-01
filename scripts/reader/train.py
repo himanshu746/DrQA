@@ -33,7 +33,7 @@ logger = logging.getLogger()
 
 
 # Defaults
-DATA_DIR = os.path.join(DRQA_DATA, 'test_datasets')
+DATA_DIR = os.path.join(DRQA_DATA, 'datasets')
 MODEL_DIR = os.path.join (DRQA_DATA, 'models')
 EMBED_DIR = os.path.join(DRQA_DATA, 'embeddings')
 
@@ -239,7 +239,7 @@ def train(args, data_loader, data_loader_source, data_loader_target, train_loade
         # Calculate n_critic
         epoch = global_stats['epoch']
         n_critic = args.n_critic
-        if n_critic > 0 and ((epoch == 0 and idx <= 25) or (edx % 500 == 0)):
+        if n_critic > 0 and ((epoch == 0 and idx <= 25) or (idx % 500 == 0)):
             n_critic = 10
 
         train_loss.update(*model.update(ex, n_critic, epoch))
