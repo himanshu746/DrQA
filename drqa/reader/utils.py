@@ -17,6 +17,19 @@ from .data import Dictionary
 
 logger = logging.getLogger(__name__)
 
+# ------------------------------------------------------------------------------
+# Freeze and Unfreeze Network
+# ------------------------------------------------------------------------------
+
+def freeze_net(net):
+    for p in net.parameters():
+        p.requires_grad = False
+
+
+def unfreeze_net(net):
+    for p in net.parameters():
+        p.requires_grad = True
+
 
 # ------------------------------------------------------------------------------
 # Data loading

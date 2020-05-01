@@ -14,9 +14,9 @@ import logging
 import json
 import pathlib
 
-dir1 = pathlib.Path(__file__).parent.absolute()
+dir1 = pathlib.Path().absolute()
 
-sys.path.append(os.path.abspath('/'.join (dir1.split ('/')[ : -2 ])))
+sys.path.append(os.path.abspath(str (dir1)))
 
 from tqdm import tqdm
 from drqa.reader import Predictor

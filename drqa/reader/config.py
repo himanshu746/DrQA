@@ -15,14 +15,16 @@ logger = logging.getLogger(__name__)
 MODEL_ARCHITECTURE = {
     'model_type', 'embedding_dim', 'hidden_size', 'doc_layers',
     'question_layers', 'rnn_type', 'concat_rnn_layers', 'question_merge',
-    'use_qemb', 'use_in_question', 'use_pos', 'use_ner', 'use_lemma', 'use_tf'
+    'use_qemb', 'use_in_question', 'use_pos', 'use_ner', 'use_lemma', 'use_tf',
+    'hidden_size_Q', 'batch-norm-q'
 }
 
 # Index of arguments concerning the model optimizer/training
 MODEL_OPTIMIZER = {
     'fix_embeddings', 'optimizer', 'learning_rate', 'momentum', 'weight_decay',
     'rnn_padding', 'dropout_rnn', 'dropout_rnn_output', 'dropout_emb',
-    'max_len', 'grad_clipping', 'tune_partial'
+    'max_len', 'grad_clipping', 'tune_partial', 'Q_learning_rate', 'clip_lower',
+    'clip_upper', 'lambd', 'dropoutQ', 'n_critic'
 }
 
 
@@ -66,6 +68,18 @@ def add_model_args(parser):
                         help='Whether to use lemma features')
     detail.add_argument('--use-tf', type='bool', default=True,
                         help='Whether to use term frequency features')
+
+    # Language Detector Model specific details
+    adv = parser.add_argument_group ('Language Detector Model architecture')
+    adv.add_argument('--Q-learning-rate', type=float, default=0.0005, help='Learning rate for language detector')
+    adv.add_argument('--clip-lower', type=float, default=-0.01, help='Lower limit for clip for language detector weights')
+    adv.add_argument('--clip-upper', type=float, default=0.01, help='Upper limit for clip for language detector weights')
+    adv.add_argument('--lambd', type=float, default=0.01, help='Lambda for Adv. Training')
+    adv.add_argument('--Q_layers', type=int, default=2)
+    adv.add_argument('--dropoutQ', type=float, default=0.2, help='Dropout for language detector')
+    adv.add_argument('--batch-norm-q', type=bool, default=True, help='Should language detector use batch normalization')
+    adv.add_argument('--n-critic', type=int, default=5,
+                     help='Number of iterations of language detector per source dataloader iteration')
 
     # Optimization details
     optim = parser.add_argument_group('DrQA Reader Optimization')

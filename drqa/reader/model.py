@@ -15,6 +15,9 @@ import copy
 
 from .config import override_model_args
 from .rnn_reader import RnnDocReader
+from .docqa import DocQA
+from .lang_disc import LanguageDetector
+from .utils import freeze_net, unfreeze_net
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +31,19 @@ class DocReader(object):
     # Initialization
     # --------------------------------------------------------------------------
 
-    def __init__(self, args, word_dict, feature_dict,
-                 state_dict=None, normalize=True):
+    def set_iterators (self, train_loader_target,
+                 train_loader_source_Q,
+                 train_loader_target_Q):
+        self.train_loader_target = train_loader_target
+        self.train_loader_source_Q = train_loader_source_Q
+        self.train_loader_target_Q = train_loader_target_Q
+
+        # Make Iterators for Data Loaders
+        self.train_iter_source_Q = iter (self.train_loader_source_Q)
+        self.train_iter_target = iter (self.train_loader_target)
+        self.train_iter_target_Q = iter (self.train_loader_target_Q)
+
+    def __init__(self, args, word_dict, feature_dict, state_dict=None, normalize=True):
         # Book-keeping.
         self.args = args
         self.word_dict = word_dict
@@ -39,23 +53,44 @@ class DocReader(object):
         self.updates = 0
         self.use_cuda = False
         self.parallel = False
+        
 
-        # Building network. If normalize if false, scores are not normalized
+        # Building network. If normalize is false, scores are not normalized
         # 0-1 per paragraph (no softmax).
+        # 1. Transformer ( Feature Extracter )
         if args.model_type == 'rnn':
-            self.network = RnnDocReader(args, normalize)
+            self.F = RnnDocReader(args, normalize)
         else:
             raise RuntimeError('Unsupported model: %s' % args.model_type)
+
+        # Output sizes of rnn encoders
+        doc_hidden_size = 2 * args.hidden_size
+        question_hidden_size = 2 * args.hidden_size
+        if args.concat_rnn_layers:
+            doc_hidden_size *= args.doc_layers
+            question_hidden_size *= args.question_layers
+
+        # 2. Question - Answering network
+        self.P = DocQA (doc_hidden_size, question_hidden_size, normalize)
+
+        # 3. Language Detector
+        self.Q = LanguageDetector(2, doc_hidden_size, args.dropoutQ, True)
+        # self.Q = LanguageDetector (doc_hidden_size, question_hidden_size, normalize, 2, args.dropoutQ, True)
+
+        # TODO : Write good comment
+        self.sum_source_q, self.sum_target_q = dict(), dict()
 
         # Load saved state
         if state_dict:
             # Load buffer separately
-            if 'fixed_embedding' in state_dict:
-                fixed_embedding = state_dict.pop('fixed_embedding')
-                self.network.load_state_dict(state_dict)
-                self.network.register_buffer('fixed_embedding', fixed_embedding)
+            if 'fixed_embedding' in state_dict['F']:
+                fixed_embedding = state_dict['F'].pop('fixed_embedding')
+                self.F.load_state_dict(state_dict['F'])
+                self.F.register_buffer('fixed_embedding', fixed_embedding)
             else:
-                self.network.load_state_dict(state_dict)
+                self.F.load_state_dict(state_dict['F'])
+            self.P.load_state_dict(state_dict['P'])
+            self.Q.load_state_dict(state_dict['Q'])
 
     def expand_dictionary(self, words):
         """Add words to the DocReader dictionary if they do not exist. The
@@ -77,11 +112,11 @@ class DocReader(object):
             self.args.vocab_size = len(self.word_dict)
             logger.info('New vocab size: %d' % len(self.word_dict))
 
-            old_embedding = self.network.embedding.weight.data
-            self.network.embedding = torch.nn.Embedding(self.args.vocab_size,
+            old_embedding = self.F.embedding.weight.data
+            self.F.embedding = torch.nn.Embedding(self.args.vocab_size,
                                                         self.args.embedding_dim,
                                                         padding_idx=0)
-            new_embedding = self.network.embedding.weight.data
+            new_embedding = self.F.embedding.weight.data
             new_embedding[:old_embedding.size(0)] = old_embedding
 
         # Return added words
@@ -98,7 +133,7 @@ class DocReader(object):
         words = {w for w in words if w in self.word_dict}
         logger.info('Loading pre-trained embeddings for %d words from %s' %
                     (len(words), embedding_file))
-        embedding = self.network.embedding.weight.data
+        embedding = self.F.embedding.weight.data
 
         # When normalized, some words are duplicated. (Average the embeddings).
         vec_counts = {}
@@ -150,7 +185,7 @@ class DocReader(object):
             return
 
         # Shuffle words and vectors
-        embedding = self.network.embedding.weight.data
+        embedding = self.F.embedding.weight.data
         for idx, swap_word in enumerate(words, self.word_dict.START):
             # Get current word + embedding for this index
             curr_word = self.word_dict[idx]
@@ -166,7 +201,7 @@ class DocReader(object):
             self.word_dict[old_idx] = curr_word
 
         # Save the original, fixed embeddings
-        self.network.register_buffer(
+        self.F.register_buffer(
             'fixed_embedding', embedding[idx + 1:].clone()
         )
 
@@ -177,32 +212,31 @@ class DocReader(object):
             state_dict: network parameters
         """
         if self.args.fix_embeddings:
-            for p in self.network.embedding.parameters():
-                p.requires_grad = False
-        parameters = [p for p in self.network.parameters() if p.requires_grad]
+            freeze_net (self.F.embedding)
+ 
+        # Optimizer for F and P
+        parametersF = [p for p in self.F.parameters() if p.requires_grad]
+        parametersP = [p for p in self.P.parameters() if p.requires_grad]
+        parameters = parametersF + parametersP
         if self.args.optimizer == 'sgd':
-            self.optimizer = optim.SGD(parameters, self.args.learning_rate,
+            self.optimizerF = optim.SGD(parameters, self.args.learning_rate,
                                        momentum=self.args.momentum,
                                        weight_decay=self.args.weight_decay)
         elif self.args.optimizer == 'adamax':
-            self.optimizer = optim.Adamax(parameters,
+            self.optimizerF = optim.Adamax(parameters,
                                           weight_decay=self.args.weight_decay)
         else:
             raise RuntimeError('Unsupported optimizer: %s' %
                                self.args.optimizer)
 
+        # Optimizer for Q
+        self.optimizerQ = optim.Adam (self.Q.parameters(), lr = self.args.Q_learning_rate)
+
     # --------------------------------------------------------------------------
     # Learning
     # --------------------------------------------------------------------------
 
-    def update(self, ex):
-        """Forward a batch of examples; step the optimizer to update weights."""
-        if not self.optimizer:
-            raise RuntimeError('No optimizer set.')
-
-        # Train mode
-        self.network.train()
-
+    def getDataPoint (self, ex):
         # Transfer to GPU
         if self.use_cuda:
             inputs = [e if e is None else e.cuda(non_blocking=True)
@@ -214,28 +248,132 @@ class DocReader(object):
             target_s = ex[5]
             target_e = ex[6]
 
-        # Run forward
-        score_s, score_e = self.network(*inputs)
+        return {
+            'inputs' : inputs,
+            'target_s' : target_s,
+            'target_e' : target_e
+        }
+
+    def getInputForQ(self, a, b):
+        b = b.float()
+        b = b.unsqueeze(1)
+        a = b @ a
+        a = a.squeeze(1)
+        return a
+
+    def update(self, ex, n_critic, current_epoch):
+        """Forward a batch of examples; step the optimizer to update weights."""
+        if (not self.optimizerF) or (not self.optimizerQ):
+            raise RuntimeError('No optimizer set.')
+
+        # Train mode
+        self.F.train()
+        self.P.train()
+        self.Q.train()
+
+        data_point_source =  self.getDataPoint (ex)
+
+        try:
+            inputs_target = next (self.train_iter_target)
+        except:
+            self.train_iter_target = iter (self.train_loader_target)
+            inputs_target = next (self.train_iter_target)
+
+        data_point_target = self.getDataPoint (inputs_target)
+
+        # Q Iterations
+        freeze_net (self.F)
+        freeze_net (self.P)
+        unfreeze_net (self.Q)
+
+        for _ in range (n_critic):
+            # clip Q weights
+            for p in self.Q.parameters():
+                p.data.clamp_ (self.args.clip_lower, self.args.clip_upper)
+            self.Q.zero_grad ()
+            
+            # Get a minibatch of data
+            try:
+                inputs_source_q = next (self.train_iter_source_Q)
+            except StopIteration:
+                self.train_iter_source_Q = iter (self.train_loader_source_Q)
+                inputs_source_q = next (self.train_iter_source_Q)
+            
+            try:
+                inputs_target_q = next (self.train_iter_target_Q)
+            except StopIteration:
+                self.train_iter_target_Q = iter (self.train_loader_target_Q)
+                inputs_target_q = next (self.train_iter_target_Q)
+
+            q_inputs_source = self.getDataPoint (inputs_source_q)
+            q_inputs_target = self.getDataPoint (inputs_target_q)
+
+            features_source = self.F(*(q_inputs_source['inputs']))
+            input_q = self.getInputForQ (features_source[0], features_source[2])
+            o_source_ad = self.Q (input_q)
+            l_source_ad = torch.mean (o_source_ad)
+            (-l_source_ad).backward()
+            logger.debug (f'Q grad norm: {self.Q.net[1].weight.grad.data.norm()}')
+            if self.sum_source_q.get (current_epoch, None) is None:
+                self.sum_source_q[current_epoch] = [0, 0.0]
+            self.sum_source_q[current_epoch][0] += 1
+            self.sum_source_q[current_epoch][1] += l_source_ad.item()
+
+            features_target = self.F(*(q_inputs_target['inputs']))
+            input_q = self.getInputForQ (features_target[0], features_target[2])
+            o_target_ad = self.Q (input_q)
+            l_target_ad = torch.mean (o_target_ad)
+            l_target_ad.backward()
+            logger.debug (f'Q grad norm: {self.Q.net[1].weight.grad.data.norm()}')
+            if self.sum_target_q.get (current_epoch, None) is None:
+                self.sum_target_q[current_epoch] = [0, 0.0]
+            self.sum_target_q[current_epoch][0] += 1
+            self.sum_target_q[current_epoch][1] += l_target_ad.item()
+
+            self.optimizerQ.step()
+
+        # F and P iteration
+        unfreeze_net (self.F)
+        unfreeze_net (self.P)
+        freeze_net (self.Q)
+
+        # Clip Q weights
+        for p in self.Q.parameters():
+            p.data.clamp_(self.args.clip_lower, self.args.clip_upper)
+        self.F.zero_grad()
+        self.P.zero_grad()
+
+        features_source = self.F(*(data_point_source['inputs']))
+        score_s, score_e = self.P(*features_source)
 
         # Compute loss and accuracies
-        loss = F.nll_loss(score_s, target_s) + F.nll_loss(score_e, target_e)
+        l_source_qa = F.nll_loss(score_s, data_point_source['target_s']) + F.nll_loss(score_e, data_point_source['target_e'])
+        l_source_qa.backward(retain_graph=True)
+        
+        input_q = self.getInputForQ (features_source[0], features_source[2])
+        o_source_ad = self.Q(input_q)
+        l_source_ad = torch.mean(o_source_ad)
+        (self.args.lambd * l_source_ad).backward(retain_graph=True)
 
-        # Clear gradients and run backward
-        self.optimizer.zero_grad()
-        loss.backward()
+        features_target = self.F(*(data_point_target['inputs']))
+        input_q = self.getInputForQ (features_target[0], features_target[2])
+        o_target_ad = self.Q(input_q)
+        l_target_ad = torch.mean(o_target_ad)
+        (-self.args.lambd * l_target_ad).backward(retain_graph=True)
 
         # Clip gradients
-        torch.nn.utils.clip_grad_norm_(self.network.parameters(),
+        torch.nn.utils.clip_grad_norm_(self.F.parameters(),
                                        self.args.grad_clipping)
+        torch.nn.utils.clip_grad_norm_(self.P.parameters(),
+                                        self.args.grad_clipping)
 
-        # Update parameters
-        self.optimizer.step()
+        self.optimizerF.step ()
         self.updates += 1
 
         # Reset any partially fixed parameters (e.g. rare words)
         self.reset_parameters()
 
-        return loss.item(), ex[0].size(0)
+        return l_source_qa.item(), ex[0].size(0)
 
     def reset_parameters(self):
         """Reset any partially fixed parameters to original states."""
@@ -243,11 +381,11 @@ class DocReader(object):
         # Reset fixed embeddings to original value
         if self.args.tune_partial > 0:
             if self.parallel:
-                embedding = self.network.module.embedding.weight.data
-                fixed_embedding = self.network.module.fixed_embedding
+                embedding = self.F.module.embedding.weight.data
+                fixed_embedding = self.F.module.fixed_embedding
             else:
-                embedding = self.network.embedding.weight.data
-                fixed_embedding = self.network.fixed_embedding
+                embedding = self.F.embedding.weight.data
+                fixed_embedding = self.F.fixed_embedding
 
             # Embeddings to fix are the last indices
             offset = embedding.size(0) - fixed_embedding.size(0)
@@ -276,7 +414,8 @@ class DocReader(object):
         If async_pool is given, these will be AsyncResult handles.
         """
         # Eval mode
-        self.network.eval()
+        self.F.eval()
+        self.P.eval()
 
         # Transfer to GPU
         if self.use_cuda:
@@ -287,7 +426,8 @@ class DocReader(object):
 
         # Run forward
         with torch.no_grad():
-            score_s, score_e = self.network(*inputs)
+            features = self.F(*inputs)
+            score_s, score_e = self.P(*features)
 
         # Decode predictions
         score_s = score_s.data.cpu()
@@ -397,12 +537,20 @@ class DocReader(object):
 
     def save(self, filename):
         if self.parallel:
-            network = self.network.module
+            networkF = self.F.module
+            networkP = self.P.module
+            networkQ = self.Q.module
         else:
-            network = self.network
-        state_dict = copy.copy(network.state_dict())
-        if 'fixed_embedding' in state_dict:
-            state_dict.pop('fixed_embedding')
+            networkF = self.F
+            networkP = self.P
+            networkQ = self.Q
+        state_dict = dict()
+        state_dict['F'] = copy.copy(networkF.state_dict())
+        state_dict['P'] = copy.copy(networkP.state_dict())
+        state_dict['Q'] = copy.copy(networkQ.state_dict())
+
+        if 'fixed_embedding' in state_dict['F']:
+            state_dict['F'].pop('fixed_embedding')
         params = {
             'state_dict': state_dict,
             'word_dict': self.word_dict,
@@ -416,16 +564,26 @@ class DocReader(object):
 
     def checkpoint(self, filename, epoch):
         if self.parallel:
-            network = self.network.module
+            networkF = self.F.module
+            networkP = self.P.module
+            networkQ = self.Q.module
         else:
-            network = self.network
+            networkF = self.F
+            networkP = self.P
+            networkQ = self.Q
+
+        state_dict = dict()
+        state_dict['F'] = networkF.state_dict()
+        state_dict['P'] = networkP.state_dict()
+        state_dict['Q'] = networkQ.state_dict()
+        optimizer = {'F' : self.optimizerF.state_dict(), 'Q' : self.optimizerQ.state_dict()}
         params = {
-            'state_dict': network.state_dict(),
+            'state_dict': state_dict,
             'word_dict': self.word_dict,
             'feature_dict': self.feature_dict,
             'args': self.args,
             'epoch': epoch,
-            'optimizer': self.optimizer.state_dict(),
+            'optimizer': optimizer,
         }
         try:
             torch.save(params, filename)
@@ -433,7 +591,7 @@ class DocReader(object):
             logger.warning('WARN: Saving failed... continuing anyway.')
 
     @staticmethod
-    def load(filename, new_args=None, normalize=True):
+    def load(filename, args, new_args=None, normalize=True):
         logger.info('Loading model %s' % filename)
         saved_params = torch.load(
             filename, map_location=lambda storage, loc: storage
@@ -468,15 +626,22 @@ class DocReader(object):
 
     def cuda(self):
         self.use_cuda = True
-        self.network = self.network.cuda()
+        self.F = self.F.cuda()
+        self.P = self.P.cuda()
+        self.Q = self.Q.cuda()
 
     def cpu(self):
         self.use_cuda = False
-        self.network = self.network.cpu()
+        self.F = self.F.cpu()
+        self.P = self.P.cpu()
+        self.Q = self.Q.cpu()
 
     def parallelize(self):
         """Use data parallel to copy the model across several gpus.
         This will take all gpus visible with CUDA_VISIBLE_DEVICES.
         """
         self.parallel = True
-        self.network = torch.nn.DataParallel(self.network)
+        self.F = torch.nn.DataParallel(self.F)
+        self.P = torch.nn.DataParallel(self.P)
+        self.Q = torch.nn.DataParallel(self.Q)
+

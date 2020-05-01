@@ -16,9 +16,9 @@ import subprocess
 import logging
 import pathlib
 
-dir1 = pathlib.Path(__file__).parent.absolute()
+dir1 = pathlib.Path().absolute()
 
-sys.path.append(os.path.abspath('/'.join (dir1.split ('/')[ : -2 ])))
+sys.path.append(os.path.abspath(str (dir1)))
 
 from drqa.reader import utils, vector, config, data
 from drqa.reader import DocReader
@@ -33,8 +33,8 @@ logger = logging.getLogger()
 
 
 # Defaults
-DATA_DIR = os.path.join(DRQA_DATA, 'datasets')
-MODEL_DIR = '/tmp/drqa-models/'
+DATA_DIR = os.path.join(DRQA_DATA, 'test_datasets')
+MODEL_DIR = os.path.join (DRQA_DATA, 'models')
 EMBED_DIR = os.path.join(DRQA_DATA, 'embeddings')
 
 def str2bool(v):
@@ -67,27 +67,36 @@ def add_train_args(parser):
     runtime.add_argument('--test-batch-size', type=int, default=128,
                          help='Batch size during validation/testing')
 
+    # Hyperparameters for Adv. Training
+    
+
     # Files
     files = parser.add_argument_group('Filesystem')
     files.add_argument('--model-dir', type=str, default=MODEL_DIR,
                        help='Directory for saved models/checkpoints/logs')
-    files.add_argument('--model-name', type=str, default='',
+    files.add_argument('--model-name', type=str, default='test_model',
                        help='Unique model identifier (.mdl, .txt, .checkpoint)')
     files.add_argument('--data-dir', type=str, default=DATA_DIR,
                        help='Directory of training/validation data')
     files.add_argument('--train-file', type=str,
-                       default='train-processed-corenlp.txt',
+                       default='train-processed-simple.txt',
                        help='Preprocessed train file')
+    files.add_argument('--train-file-source', type=str,
+                       default='english_train-processed-simple.txt',
+                       help='Preprocessed train file for source language')
+    files.add_argument('--train-file-target', type=str,
+                        default='bengali_train-processed-simple.txt',
+                        help='Preprocessed train file for target language')
     files.add_argument('--dev-file', type=str,
-                       default='dev-processed-corenlp.txt',
+                       default='bengali_dev-processed-simple.txt',
                        help='Preprocessed dev file')
-    files.add_argument('--dev-json', type=str, default='dev.json',
+    files.add_argument('--dev-json', type=str, default='bengali_dev.json',
                        help=('Unprocessed dev file to run validation '
                              'while training on'))
     files.add_argument('--embed-dir', type=str, default=EMBED_DIR,
                        help='Directory of pre-trained embedding files')
     files.add_argument('--embedding-file', type=str,
-                       default='glove.840B.300d.txt',
+                       default='bengali_english.EMB',
                        help='Space-separated pretrained embeddings file')
 
     # Saving + loading
@@ -129,6 +138,12 @@ def set_defaults(args):
     args.train_file = os.path.join(args.data_dir, args.train_file)
     if not os.path.isfile(args.train_file):
         raise IOError('No such file: %s' % args.train_file)
+    args.train_file_source = os.path.join(args.data_dir, args.train_file_source)
+    if not os.path.isfile(args.train_file_source):
+        raise IOError('No such file: %s' % args.train_file_source)
+    args.train_file_target = os.path.join(args.data_dir, args.train_file_target)
+    if not os.path.isfile(args.train_file_target):
+        raise IOError('No such file: %s' % args.train_file_target)
     args.dev_file = os.path.join(args.data_dir, args.dev_file)
     if not os.path.isfile(args.dev_file):
         raise IOError('No such file: %s' % args.dev_file)
@@ -212,15 +227,22 @@ def init_from_scratch(args, train_exs, dev_exs):
 # ------------------------------------------------------------------------------
 
 
-def train(args, data_loader, model, global_stats):
+def train(args, data_loader, data_loader_source, data_loader_target, train_loader_source_Q, train_loader_target_Q, model, global_stats):
     """Run through one epoch of model training with the provided data loader."""
     # Initialize meters + timers
     train_loss = utils.AverageMeter()
     epoch_time = utils.Timer()
 
     # Run one epoch
-    for idx, ex in enumerate(data_loader):
-        train_loss.update(*model.update(ex))
+    for idx, ex in enumerate(data_loader_source):
+
+        # Calculate n_critic
+        epoch = global_stats['epoch']
+        n_critic = args.n_critic
+        if n_critic > 0 and ((epoch == 0 and idx <= 25) or (edx % 500 == 0)):
+            n_critic = 10
+
+        train_loss.update(*model.update(ex, n_critic, epoch))
 
         if idx % args.display_iter == 0:
             logger.info('train: Epoch = %d | iter = %d/%d | ' %
@@ -368,7 +390,11 @@ def main(args):
     # DATA
     logger.info('-' * 100)
     logger.info('Load data files')
+    train_exs_source = utils.load_data (args, args.train_file_source, skip_no_answer=True)
+    train_exs_target = utils.load_data (args, args.train_file_target, skip_no_answer=True)
     train_exs = utils.load_data(args, args.train_file, skip_no_answer=True)
+    logger.info('Num source train examples = %d' % len(train_exs_source))
+    logger.info('Num target train examples = %d' % len(train_exs_target))
     logger.info('Num train examples = %d' % len(train_exs))
     dev_exs = utils.load_data(args, args.dev_file)
     logger.info('Num dev examples = %d' % len(dev_exs))
@@ -389,13 +415,13 @@ def main(args):
         # Just resume training, no modifications.
         logger.info('Found a checkpoint...')
         checkpoint_file = args.model_file + '.checkpoint'
-        model, start_epoch = DocReader.load_checkpoint(checkpoint_file, args)
+        model, start_epoch = DocReader.load_checkpoint(checkpoint_file, normalize=True)
     else:
         # Training starts fresh. But the model state is either pretrained or
         # newly (randomly) initialized.
         if args.pretrained:
             logger.info('Using pretrained model...')
-            model = DocReader.load(args.pretrained, args)
+            model = DocReader.load(args.pretrained,  new_args=None, normalize=True)
             if args.expand_dictionary:
                 logger.info('Expanding dictionary for new data...')
                 # Add words in training + dev examples
@@ -441,12 +467,24 @@ def main(args):
     logger.info('-' * 100)
     logger.info('Make data loaders')
     train_dataset = data.ReaderDataset(train_exs, model, single_answer=True)
+    train_dataset_source = data.ReaderDataset(train_exs_source, model, single_answer=True)
+    train_dataset_target = data.ReaderDataset(train_exs_target, model, single_answer=True)
     if args.sort_by_len:
         train_sampler = data.SortedBatchSampler(train_dataset.lengths(),
                                                 args.batch_size,
                                                 shuffle=True)
+
+        train_sampler_source = data.SortedBatchSampler(train_dataset_source.lengths(),
+                                                args.batch_size,
+                                                shuffle=True)
+
+        train_sampler_target = data.SortedBatchSampler(train_dataset_target.lengths(),
+                                                args.batch_size,
+                                                shuffle=True)
     else:
         train_sampler = torch.utils.data.sampler.RandomSampler(train_dataset)
+        train_sampler_source = torch.utils.data.sampler.RandomSampler(train_dataset_source)
+        train_sampler_target = torch.utils.data.sampler.RandomSampler(train_dataset_target)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -455,6 +493,38 @@ def main(args):
         collate_fn=vector.batchify,
         pin_memory=args.cuda,
     )
+    train_loader_source = torch.utils.data.DataLoader(
+        train_dataset_source,
+        batch_size=args.batch_size,
+        sampler=train_sampler_source,
+        num_workers=args.data_workers,
+        collate_fn=vector.batchify,
+        pin_memory=args.cuda,
+    )
+    train_loader_target = torch.utils.data.DataLoader(
+        train_dataset_target,
+        batch_size=args.batch_size,
+        sampler=train_sampler_target,
+        num_workers=args.data_workers,
+        collate_fn=vector.batchify,
+        pin_memory=args.cuda,
+    )
+    train_loader_source_Q = torch.utils.data.DataLoader(
+        train_dataset_source,
+        batch_size=args.batch_size,
+        sampler=train_sampler_source,
+        num_workers=args.data_workers,
+        collate_fn=vector.batchify,
+        pin_memory=args.cuda,
+    )
+    train_loader_target_Q = torch.utils.data.DataLoader(
+        train_dataset_target,
+        batch_size=args.batch_size,
+        sampler=train_sampler_target,
+        num_workers=args.data_workers,
+        collate_fn=vector.batchify,
+        pin_memory=args.cuda,
+    ) 
     dev_dataset = data.ReaderDataset(dev_exs, model, single_answer=False)
     if args.sort_by_len:
         dev_sampler = data.SortedBatchSampler(dev_dataset.lengths(),
@@ -470,6 +540,7 @@ def main(args):
         collate_fn=vector.batchify,
         pin_memory=args.cuda,
     )
+    
 
     # -------------------------------------------------------------------------
     # PRINT CONFIG
@@ -482,11 +553,14 @@ def main(args):
     logger.info('-' * 100)
     logger.info('Starting training...')
     stats = {'timer': utils.Timer(), 'epoch': 0, 'best_valid': 0}
+
+    model.set_iterators (train_loader_target, train_loader_source_Q, train_loader_target_Q)
+
     for epoch in range(start_epoch, args.num_epochs):
         stats['epoch'] = epoch
 
         # Train
-        train(args, train_loader, model, stats)
+        train(args, train_loader, train_loader_source, train_loader_target, train_loader_source_Q, train_loader_target_Q, model, stats)
 
         # Validate unofficial (train)
         validate_unofficial(args, train_loader, model, stats, mode='train')
@@ -545,6 +619,8 @@ if __name__ == '__main__':
         logfile.setFormatter(fmt)
         logger.addHandler(logfile)
     logger.info('COMMAND: %s' % ' '.join(sys.argv))
+
+    # print (args.)
 
     # Run!
     main(args)
