@@ -88,7 +88,8 @@ def batchify(batch):
     questions = [ex[2] for ex in batch]
 
     # Batch documents and features
-    max_length = max([d.size(0) for d in docs])
+    # max_length = max([d.size(0) for d in docs])
+    max_length = 980
     x1 = torch.LongTensor(len(docs), max_length).zero_()
     x1_mask = torch.ByteTensor(len(docs), max_length).fill_(1)
     if features[0] is None:

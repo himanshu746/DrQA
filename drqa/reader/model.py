@@ -16,7 +16,7 @@ import copy
 from .config import override_model_args
 from .rnn_reader import RnnDocReader
 from .docqa import DocQA
-from .lang_disc import LanguageDetector
+from .lang_disc import LanguageDetector, LanguageDetectorRNN
 from .utils import freeze_net, unfreeze_net
 
 logger = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ class DocReader(object):
         self.P = DocQA (doc_hidden_size, question_hidden_size, normalize)
 
         # 3. Language Detector
-        self.Q = LanguageDetector(2, doc_hidden_size, args.dropoutQ, True)
+        self.Q = LanguageDetectorRNN(2, doc_hidden_size, args.dropoutQ, True)
         # self.Q = LanguageDetector (doc_hidden_size, question_hidden_size, normalize, 2, args.dropoutQ, True)
 
         # TODO : Write good comment
@@ -255,10 +255,7 @@ class DocReader(object):
         }
 
     def getInputForQ(self, a, b):
-        b = b.float()
-        b = b.unsqueeze(1)
-        a = b @ a
-        a = a.squeeze(1)
+        # a = torch.reshape (a, (a.shape[0], -1))
         return a
 
     def update(self, ex, n_critic, current_epoch):
@@ -309,11 +306,16 @@ class DocReader(object):
             q_inputs_target = self.getDataPoint (inputs_target_q)
 
             features_source = self.F(*(q_inputs_source['inputs']))
+            # logger.info('Printing features for one document')
+            # logger.info('-------------------------------------')
+            # logger.info (features_source[0][0])
+            # for x in features_source:
+            #     print (x.shape)
             input_q = self.getInputForQ (features_source[0], features_source[2])
             o_source_ad = self.Q (input_q)
             l_source_ad = torch.mean (o_source_ad)
             (-l_source_ad).backward()
-            logger.debug (f'Q grad norm: {self.Q.net[1].weight.grad.data.norm()}')
+            # logger.debug (f'Q grad norm: {self.Q.lstm.weight.grad.data.norm()}')
             if self.sum_source_q.get (current_epoch, None) is None:
                 self.sum_source_q[current_epoch] = [0, 0.0]
             self.sum_source_q[current_epoch][0] += 1
@@ -324,7 +326,7 @@ class DocReader(object):
             o_target_ad = self.Q (input_q)
             l_target_ad = torch.mean (o_target_ad)
             l_target_ad.backward()
-            logger.debug (f'Q grad norm: {self.Q.net[1].weight.grad.data.norm()}')
+            # logger.debug (f'Q grad norm: {self.Q.lstm.weight.grad.data.norm()}')
             if self.sum_target_q.get (current_epoch, None) is None:
                 self.sum_target_q[current_epoch] = [0, 0.0]
             self.sum_target_q[current_epoch][0] += 1

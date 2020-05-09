@@ -379,6 +379,12 @@ def eval_accuracies(pred_s, target_s, pred_e, target_e):
             em.update(0)
     return start.avg * 100, end.avg * 100, em.avg * 100
 
+def getMaxLen(exs):
+    mxlen = 0
+    for ex in exs:
+        mxlen = max(mxlen, len(ex['document']))
+    return mxlen
+
 
 # ------------------------------------------------------------------------------
 # Main.
@@ -393,6 +399,7 @@ def main(args):
     train_exs_source = utils.load_data (args, args.train_file_source, skip_no_answer=True)
     train_exs_target = utils.load_data (args, args.train_file_target, skip_no_answer=True)
     train_exs = utils.load_data(args, args.train_file, skip_no_answer=True)
+    logger.info ('Max length of document : ' + str (getMaxLen (train_exs)))
     logger.info('Num source train examples = %d' % len(train_exs_source))
     logger.info('Num target train examples = %d' % len(train_exs_target))
     logger.info('Num train examples = %d' % len(train_exs))
