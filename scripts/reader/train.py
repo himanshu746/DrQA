@@ -399,11 +399,17 @@ def main(args):
     train_exs_source = utils.load_data (args, args.train_file_source, skip_no_answer=True)
     train_exs_target = utils.load_data (args, args.train_file_target, skip_no_answer=True)
     train_exs = utils.load_data(args, args.train_file, skip_no_answer=True)
+    mxln = getMaxLen(train_exs)
+    mxln = max(mxln, getMaxLen(train_exs_source))
+    mxln = max(mxln, getMaxLen(train_exs_target))
+    logger.info ('mxln = ' + str(mxln))
     logger.info ('Max length of document : ' + str (getMaxLen (train_exs)))
     logger.info('Num source train examples = %d' % len(train_exs_source))
     logger.info('Num target train examples = %d' % len(train_exs_target))
     logger.info('Num train examples = %d' % len(train_exs))
     dev_exs = utils.load_data(args, args.dev_file)
+    mxln = max(mxln, getMaxLen(dev_exs))
+    logger.info ('mxln = ' + str(mxln))
     logger.info('Num dev examples = %d' % len(dev_exs))
 
     # If we are doing offician evals then we need to:

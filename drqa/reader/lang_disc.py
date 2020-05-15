@@ -42,13 +42,14 @@ class LanguageDetectorRNN(nn.Module):
         super(LanguageDetectorRNN, self).__init__()
         assert num_layers >= 0, 'Invalid layer numbers'
 
-        self.hidden_size = hidden_size
+        self.input_size = hidden_size
         self.num_layers = num_layers
         self.dropout = dropout
+        self.hidden_size = 32
         
         # input size = (B, T, F) -> output size = ()
-        self.lstm = nn.LSTM(self.hidden_size, self.hidden_size, self.num_layers, batch_first=True, dropout=self.dropout)
-        self.linear = nn.Linear(hidden_size, 1, bias=True)
+        self.lstm = nn.LSTM(self.input_size, self.hidden_size, self.num_layers, batch_first=True, dropout=self.dropout)
+        self.linear = nn.Linear(self.hidden_size, 1, bias=True)
         
     def forward(self, input):
         # input : (B, T, F)
@@ -61,3 +62,35 @@ class LanguageDetectorRNN(nn.Module):
 
         out = self.linear(output)
         return out
+
+class Flatten(nn.Module):
+    def forward(self, input):
+        return input.view(input.size(0), -1)
+
+class LanguageDetectorCNN(nn.Module):
+    def __init__(self, num_layers, hidden_size, dropout, batch_norm=False):
+        super(LanguageDetectorCNN, self).__init__()
+        assert num_layers >= 3, 'Invalid layer numbers'
+        
+        self.net = nn.Sequential()
+        self.input_size = hidden_size
+        self.h = 1650
+        self.w = 768
+        for i in range(num_layers):
+            self.net.add_module ('conv-' + str (i), nn.Conv2d(1, 1, (3, 3), stride=(2, 2)))
+            self.h = ((self.h - 3) // 2) + 1
+            self.w = ((self.w - 3) // 2) + 1
+            self.net.add_module ('pool-' + str (i), nn.AvgPool2d((2, 2), stride=(2, 2)))
+            self.h = ((self.h - 2) // 2) + 1
+            self.w = ((self.w - 2) // 2) + 1
+        
+        self.net.add_module ('flatten', Flatten())
+        self.net.add_module('fc1', nn.Linear(self.h * self.w, 32, bias=True))
+        self.net.add_module ('softmax', nn.Softmax ())
+        self.net.add_module('fc2', nn.Linear(32, 1, bias=True))
+
+    def forward(self, x):
+        x = x.unsqueeze (1)
+        return self.net (x)
+
+

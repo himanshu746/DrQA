@@ -16,7 +16,7 @@ import copy
 from .config import override_model_args
 from .rnn_reader import RnnDocReader
 from .docqa import DocQA
-from .lang_disc import LanguageDetector, LanguageDetectorRNN
+from .lang_disc import LanguageDetector, LanguageDetectorRNN, LanguageDetectorCNN
 from .utils import freeze_net, unfreeze_net
 
 logger = logging.getLogger(__name__)
@@ -74,8 +74,9 @@ class DocReader(object):
         self.P = DocQA (doc_hidden_size, question_hidden_size, normalize)
 
         # 3. Language Detector
-        self.Q = LanguageDetectorRNN(2, doc_hidden_size, args.dropoutQ, True)
-        # self.Q = LanguageDetector (doc_hidden_size, question_hidden_size, normalize, 2, args.dropoutQ, True)
+        # self.Q = LanguageDetectorRNN(2, doc_hidden_size, args.dropoutQ, True)
+        self.Q = LanguageDetectorCNN (3, doc_hidden_size, 0, False)
+        
 
         # TODO : Write good comment
         self.sum_source_q, self.sum_target_q = dict(), dict()
